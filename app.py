@@ -1,15 +1,28 @@
 import os
+
+# Set thread and process caps at the absolute top before loading libraries
+os.environ["LOKY_MAX_CPU_COUNT"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["PYTHONWARNINGS"] = "ignore"
+
 import re
 import cv2
+import sys
 import json
 import uuid
 import shutil
+import warnings
+import traceback
 import numpy as np
 from datetime import datetime
 from dateutil.parser import parse
 import joblib
 import easyocr
 from flask import Flask, render_template, request, jsonify
+
+# Suppress resource_tracker warnings on shutdown
+warnings.filterwarnings("ignore", category=UserWarning, module="multiprocessing.resource_tracker")
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -22,8 +35,14 @@ ANNOTATIONS_FILE = os.path.join(DATASET_FOLDER, 'annotations.json')
 os.makedirs(REVIEW_FOLDER, exist_ok=True)
 os.makedirs(DATASET_FOLDER, exist_ok=True)
 
-# Initialize EasyOCR Reader
-reader = easyocr.Reader(['en'], gpu=False)
+# Initialize EasyOCR Reader safely
+print("Initializing EasyOCR reader...")
+try:
+    reader = easyocr.Reader(['en'], gpu=False)
+    print("EasyOCR loaded successfully.")
+except Exception as e:
+    print(f"Error loading EasyOCR: {e}")
+    reader = None
 
 # Load trained model if present
 try:
@@ -40,6 +59,36 @@ except FileNotFoundError:
 def ignore_icon_requests():
     """Suppresses browser 404 icon requests in terminal logs."""
     return '', 204
+
+
+def safe_readtext(image_np):
+    """
+    Safely executes EasyOCR against a numpy image array.
+    Guarantees returning a list (never None) and catches internal OCR exceptions.
+    """
+    if reader is None or image_np is None:
+        return []
+
+    if not isinstance(image_np, np.ndarray) or image_np.size == 0:
+        return []
+
+    try:
+        results = reader.readtext(image_np)
+        return results if results is not None else []
+    except Exception as err:
+        print(f"EasyOCR internal exception caught: {err}")
+        return []
+
+
+def extract_features(text_string):
+    """5-feature vector used by the Random Forest classifier."""
+    length = len(text_string)
+    digit_count = sum(c.isdigit() for c in text_string)
+    separator_count = (text_string.count('/') + text_string.count('-') + 
+                       text_string.count('.') + text_string.count(' '))
+    has_keywords = 1 if re.search(r'(exp|bb|best|use|prod)', text_string, re.I) else 0
+    digit_ratio = digit_count / max(length, 1)
+    return [length, digit_count, separator_count, has_keywords, digit_ratio]
 
 
 def preprocess_for_ocr(image_path, target_max_dim=1600):
@@ -184,8 +233,15 @@ def process_image_expiry(grouped_ocr_results):
             continue
 
         formatted_wording = extract_and_format_date(text)
+        has_regex_date = formatted_wording != text or bool(re.search(r'(exp|bb|best|use)', text, re.I))
 
-        if formatted_wording != text or re.search(r'(exp|bb|best|use)', text, re.I):
+        # Check AI classification if model is available
+        ai_pred = 1
+        if classifier is not None:
+            features = [extract_features(text)]
+            ai_pred = int(classifier.predict(features)[0])
+
+        if has_regex_date and ai_pred == 1:
             date_candidates.append({
                 "raw_text": text,
                 "wording": formatted_wording,
@@ -203,6 +259,9 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        if reader is None:
+            return jsonify({"error": "OCR Engine failed to initialize on startup."}), 500
+
         if 'image' not in request.files:
             return jsonify({"error": "No image uploaded"}), 400
 
@@ -216,19 +275,19 @@ def predict():
         # Generate preprocessed grayscale & binary images
         enhanced_gray, binary_img = preprocess_for_ocr(filepath)
 
-        if enhanced_gray is None:
+        if enhanced_gray is None or binary_img is None:
             if os.path.exists(filepath):
                 os.remove(filepath)
-            return jsonify({"error": "Failed to read or decode image"}), 400
+            return jsonify({"error": "Failed to read or decode image file."}), 400
 
-        # Pass 1: High-accuracy grayscale OCR
-        raw_results = reader.readtext(enhanced_gray) or []
+        # Pass 1: High-accuracy grayscale OCR using safe wrapper
+        raw_results = safe_readtext(enhanced_gray)
         grouped_lines = group_ocr_lines(raw_results)
         detected_dates = process_image_expiry(grouped_lines)
 
         # Pass 2: Fall back to dot-matrix binary OCR if Pass 1 yields no dates
         if not detected_dates:
-            raw_results_fallback = reader.readtext(binary_img) or []
+            raw_results_fallback = safe_readtext(binary_img)
             grouped_lines_fallback = group_ocr_lines(raw_results_fallback)
             detected_dates_fallback = process_image_expiry(grouped_lines_fallback)
             if detected_dates_fallback:
@@ -255,6 +314,7 @@ def predict():
 
     except Exception as e:
         print("Server Error during prediction:", str(e))
+        traceback.print_exc()
         return jsonify({"error": f"Internal processing error: {str(e)}"}), 500
 
 
@@ -307,7 +367,8 @@ def retrain():
     """
     global classifier
     try:
-        exit_code = os.system("python train.py")
+        python_exe = sys.executable
+        exit_code = os.system(f'"{python_exe}" train.py')
         if exit_code == 0 and os.path.exists("model.pkl"):
             classifier = joblib.load("model.pkl")
             return jsonify({"status": "success", "message": "Model retrained and loaded into memory."})
@@ -319,4 +380,10 @@ def retrain():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Disabling the Werkzeug reloader prevents premature process termination
+    try:
+        print("Starting Flask server on http://127.0.0.1:5050 ...")
+        app.run(host='127.0.0.1', port=5050, debug=True)
+    except Exception as ex:
+        print("Server crashed with exception:")
+        traceback.print_exc()
