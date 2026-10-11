@@ -1,5 +1,6 @@
 import os
 import re
+import cv2
 from datetime import datetime
 from dateutil.parser import parse
 import joblib
@@ -19,6 +20,24 @@ try:
 except FileNotFoundError:
     classifier = None
     print("Warning: model.pkl not found! Run train.py first.")
+
+def preprocess_image(image_path):
+    """Applies glare correction, dot-matrix joining, and thresholding."""
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(img)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    connected_dots = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
+
+    binary = cv2.adaptiveThreshold(
+        connected_dots, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    return binary
 
 def extract_features(text_string):
     length = len(text_string)
@@ -51,7 +70,7 @@ def process_image_expiry(ocr_results):
     date_candidates = []
 
     for (_, text, confidence) in ocr_results:
-        if confidence < 0.3:
+        if confidence < 0.25:
             continue
 
         features = extract_features(text)
@@ -85,7 +104,15 @@ def predict():
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
     file.save(filepath)
 
-    results = reader.readtext(filepath)
+    # 1. Preprocess 3D/Curved surface image
+    processed_img = preprocess_image(filepath)
+    
+    # 2. Run OCR on processed array (or fallback to original path if preprocessing fails)
+    if processed_img is not None:
+        results = reader.readtext(processed_img)
+    else:
+        results = reader.readtext(filepath)
+
     full_text = " ".join([text for (_, text, _) in results])
     detected_dates = process_image_expiry(results)
 
