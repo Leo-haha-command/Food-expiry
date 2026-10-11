@@ -1,6 +1,9 @@
 import os
 import re
 import cv2
+import json
+import uuid
+import shutil
 import numpy as np
 from datetime import datetime
 from dateutil.parser import parse
@@ -11,6 +14,12 @@ from flask import Flask, render_template, request, jsonify
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Active Learning Folders
+DATASET_FOLDER = 'dataset'
+REVIEW_FOLDER = os.path.join(DATASET_FOLDER, 'review_queue')
+ANNOTATIONS_FILE = os.path.join(DATASET_FOLDER, 'annotations.json')
+os.makedirs(REVIEW_FOLDER, exist_ok=True)
 
 # Initialize EasyOCR Reader
 reader = easyocr.Reader(['en'], gpu=False)
@@ -24,31 +33,43 @@ except FileNotFoundError:
     print("Warning: model.pkl not found! Run train.py first.")
 
 
-def convert_to_scanned_doc(image_path):
+def preprocess_for_ocr(image_path, target_max_dim=1600):
     """
-    Applies Gaussian blurring and shadow division to bridge dot-matrix 
-    inkjet characters on curved surfaces before binarization.
+    Dual-pass preprocessing:
+    1. Grayscale with CLAHE contrast enhancement (best for standard fonts)
+    2. Morphological closing + Otsu thresholding (fallback for dot-matrix inkjet)
+    Includes resolution capping to avoid Out-Of-Memory crashes.
     """
     img = cv2.imread(image_path)
     if img is None:
-        return None
-    
+        return None, None
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
 
-    # 1. Light Gaussian blur bridges gaps between matrix dots
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    # Memory safety: Scale images to a safe pixel dimension
+    max_dim = max(h, w)
+    if max_dim < 800:
+        scale = 2.0  # Upscale low-res stamps
+    elif max_dim > target_max_dim:
+        scale = target_max_dim / max_dim  # Downscale large photos
+    else:
+        scale = 1.0
 
-    # 2. Equalize contrast
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(blurred)
+    if scale != 1.0:
+        new_w, new_h = int(w * scale), int(h * scale)
+        gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
-    # 3. Morphological closing to join adjacent dots horizontally
+    # Pass 1: Enhanced grayscale for standard printed text
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced_gray = clahe.apply(gray)
+
+    # Pass 2: Morphological closing for dot-matrix inkjet text
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2))
-    closed = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
+    closed = cv2.morphologyEx(enhanced_gray, cv2.MORPH_CLOSE, kernel)
+    _, binary_img = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 4. Otsu Thresholding
-    _, binary = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
+    return enhanced_gray, binary_img
 
 
 def group_ocr_lines(ocr_results, y_tolerance=18):
@@ -170,30 +191,116 @@ def index():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'image' not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
+    try:
+        if 'image' not in request.files:
+            return jsonify({"error": "No image uploaded"}), 400
 
-    file = request.files['image']
-    if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
 
-    filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-    file.save(filepath)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(filepath)
 
-    scanned_image = convert_to_scanned_doc(filepath)
-    raw_results = reader.readtext(scanned_image if scanned_image is not None else filepath)
+        # Generate preprocessed grayscale & binary images
+        enhanced_gray, binary_img = preprocess_for_ocr(filepath)
 
-    grouped_lines = group_ocr_lines(raw_results)
-    full_text = " | ".join([text for (text, _) in grouped_lines])
-    detected_dates = process_image_expiry(grouped_lines)
+        if enhanced_gray is None:
+            return jsonify({"error": "Failed to read image"}), 400
 
-    if os.path.exists(filepath):
-        os.remove(filepath)
+        # Pass 1: High-accuracy grayscale OCR
+        raw_results = reader.readtext(enhanced_gray)
+        grouped_lines = group_ocr_lines(raw_results)
+        detected_dates = process_image_expiry(grouped_lines)
 
-    return jsonify({
-        "full_text": full_text,
-        "expiry_dates": detected_dates
-    })
+        # Pass 2: Fall back to dot-matrix binary OCR if Pass 1 yields no dates
+        if not detected_dates:
+            raw_results_fallback = reader.readtext(binary_img)
+            grouped_lines_fallback = group_ocr_lines(raw_results_fallback)
+            detected_dates_fallback = process_image_expiry(grouped_lines_fallback)
+            if detected_dates_fallback:
+                grouped_lines = grouped_lines_fallback
+                detected_dates = detected_dates_fallback
+
+        full_text = " | ".join([text for (text, _) in grouped_lines])
+
+        # Save preprocessed image temporarily in review queue
+        image_id = f"{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}.jpg"
+        review_filepath = os.path.join(REVIEW_FOLDER, image_id)
+        cv2.imwrite(review_filepath, enhanced_gray)
+
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        return jsonify({
+            "image_id": image_id,
+            "full_text": full_text,
+            "expiry_dates": detected_dates
+        })
+
+    except Exception as e:
+        print("Server Error:", str(e))
+        return jsonify({"error": f"Internal processing error: {str(e)}"}), 500
+
+
+@app.route('/feedback', methods=['POST'])
+def feedback():
+    """
+    Moves image to dataset/ and updates dataset/annotations.json directly.
+    """
+    try:
+        data = request.get_json() or {}
+        image_id = data.get('image_id')
+        is_expiry = data.get('is_expiry')
+
+        if not image_id or is_expiry not in [0, 1]:
+            return jsonify({"error": "Invalid payload. 'image_id' and 'is_expiry' (0 or 1) required."}), 400
+
+        source_path = os.path.join(REVIEW_FOLDER, image_id)
+        target_path = os.path.join(DATASET_FOLDER, image_id)
+
+        # 1. Move image into the main dataset folder
+        if os.path.exists(source_path):
+            shutil.move(source_path, target_path)
+
+        # 2. Read existing annotations.json (or create dictionary if missing)
+        annotations = {}
+        if os.path.exists(ANNOTATIONS_FILE):
+            try:
+                with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+                    annotations = json.load(f)
+            except json.JSONDecodeError:
+                annotations = {}
+
+        # 3. Add or update entry for this image
+        annotations[image_id] = {"is_expiry": is_expiry}
+
+        # 4. Save updated dictionary back to annotations.json
+        with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(annotations, f, indent=4)
+
+        return jsonify({"status": "success", "message": f"Updated dataset/annotations.json for {image_id}"})
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to record feedback: {str(e)}"}), 500
+
+
+@app.route('/admin/retrain', methods=['POST'])
+def retrain():
+    """
+    Executes train.py and reloads the updated model into active memory.
+    """
+    global classifier
+    try:
+        exit_code = os.system("python train.py")
+        if exit_code == 0 and os.path.exists("model.pkl"):
+            classifier = joblib.load("model.pkl")
+            return jsonify({"status": "success", "message": "Model retrained and loaded into memory."})
+        else:
+            return jsonify({"error": "Training script execution failed."}), 500
+
+    except Exception as e:
+        return jsonify({"error": f"Retraining error: {str(e)}"}), 500
 
 
 if __name__ == '__main__':

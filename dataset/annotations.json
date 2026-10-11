@@ -1,0 +1,35 @@
+{
+    "scan1.jpeg": {
+        "is_expiry": 1
+    },
+    "scan2.jpeg": {
+        "is_expiry": 1
+    },
+    "scan3.jpeg": {
+        "is_expiry": 1
+    },
+    "scan4.jpeg": {
+        "is_expiry": 1
+    },
+    "scan5.jpeg": {
+        "is_expiry": 1
+    },
+    "scan6.jpeg": {
+        "is_expiry": 1
+    },
+    "scan7.jpeg": {
+        "is_expiry": 0
+    },
+    "scan8.jpeg": {
+        "is_expiry": 0
+    },
+    "scan9.jpeg": {
+        "is_expiry": 0
+    },
+    "1791726226_71f40b.jpg": {
+        "is_expiry": 0
+    },
+    "1791726494_e3f341.jpg": {
+        "is_expiry": 1
+    }
+}

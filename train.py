@@ -1,7 +1,7 @@
 import json
 import os
 import re
-import cv2
+import cv2  # OpenCV module name in Python is cv2
 import easyocr
 import joblib
 import numpy as np
@@ -10,26 +10,35 @@ from sklearn.ensemble import RandomForestClassifier
 # Initialize EasyOCR Reader
 reader = easyocr.Reader(['en'], gpu=False)
 
-def preprocess_image(image_path):
+
+def preprocess_image(image_path, target_max_dim=1600):
     """
-    Preprocesses 3D, curved, or dot-matrix printed product images 
-    matching the app.py scanning pipeline.
+    Applies resolution capping and CLAHE contrast enhancement for clean OCR reading,
+    matching app.py and preventing Out-Of-Memory (OOM) errors on large photos.
     """
     img = cv2.imread(image_path)
     if img is None:
         return None
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    h, w = gray.shape[:2]
 
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(blurred)
+    # Calculate safe scaling factor
+    max_dim = max(h, w)
+    if max_dim < 800:
+        scale = 2.0  # Upscale small image regions
+    elif max_dim > target_max_dim:
+        scale = target_max_dim / max_dim  # Downscale oversized photos
+    else:
+        scale = 1.0
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 2))
-    closed = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
+    if scale != 1.0:
+        new_w, new_h = int(w * scale), int(h * scale)
+        gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
-    _, binary = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(gray)
+
 
 def group_ocr_lines(ocr_results, y_tolerance=18):
     """
@@ -59,6 +68,7 @@ def group_ocr_lines(ocr_results, y_tolerance=18):
 
     return [(l['text'], sum(l['confs']) / len(l['confs'])) for l in lines]
 
+
 def extract_features(text_string):
     """Identical 5-feature extraction vector as app.py."""
     length = len(text_string)
@@ -69,13 +79,15 @@ def extract_features(text_string):
     digit_ratio = digit_count / max(length, 1)
     return [length, digit_count, separator_count, has_keywords, digit_ratio]
 
+
 DATASET_DIR = "dataset"
 ANNOTATIONS_FILE = os.path.join(DATASET_DIR, "annotations.json")
+LABELS_FILE = os.path.join(DATASET_DIR, "collected_labels.jsonl")
 
 X_train = []
 y_train = []
 
-# Expanded synthetic samples covering space-separated, dot-matrix, and concatenated formats
+# 1. Synthetic samples covering baseline packaging formats
 synthetic_samples = [
     ("EXP 12/08/2027", 1),
     ("EXP : 10 01 2027", 1),
@@ -96,36 +108,60 @@ for text, label in synthetic_samples:
     X_train.append(extract_features(text))
     y_train.append(label)
 
+# 2. Consolidate image ground-truth labels from both annotations.json and collected_labels.jsonl
+image_label_map = {}
+
+# Load base labels from annotations.json if present
 if os.path.exists(ANNOTATIONS_FILE):
     with open(ANNOTATIONS_FILE, 'r') as f:
-        dataset = json.load(f)
+        annotations = json.load(f)
+        for img_name, info in annotations.items():
+            image_label_map[img_name] = info.get("is_expiry", 0)
 
-    print(f"Processing {len(dataset)} training images from '{DATASET_DIR}/'...")
+# Load user feedback labels appended by app.py
+if os.path.exists(LABELS_FILE):
+    with open(LABELS_FILE, 'r') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    record = json.loads(line)
+                    image_id = record.get("image_id")
+                    is_expiry = record.get("is_expiry")
+                    if image_id and is_expiry in [0, 1]:
+                        image_label_map[image_id] = is_expiry
+                except json.JSONDecodeError:
+                    continue
 
-    for image_name, label_info in dataset.items():
+# 3. Process all dataset images using consolidated labels
+if image_label_map:
+    print(f"Processing {len(image_label_map)} tagged images from '{DATASET_DIR}/'...")
+
+    for image_name, is_expiry_label in image_label_map.items():
         image_path = os.path.join(DATASET_DIR, image_name)
         if not os.path.exists(image_path):
-            print(f"Warning: {image_path} not found. Skipping.")
             continue
 
-        # Step A: Preprocess image using unified dot-matrix pipeline
         processed_img = preprocess_image(image_path)
         if processed_img is None:
-            print(f"Warning: Failed to load image {image_path}. Skipping.")
             continue
 
-        # Step B: Run EasyOCR & group horizontal lines
         raw_results = reader.readtext(processed_img)
         grouped_lines = group_ocr_lines(raw_results)
 
         for (text_line, confidence) in grouped_lines:
             if confidence > 0.3:
-                X_train.append(extract_features(text_line))
-                y_train.append(label_info["is_expiry"])
+                has_date_pattern = bool(re.search(
+                    r'(\b\d{1,2}[\s/.-]\d{1,2}[\s/.-]\d{2,4}\b|\b(?:exp|bb|mfg|use|prod)[\s:]*\d+|\b\d{6,8}\b)', 
+                    text_line, re.I
+                ))
+                line_label = 1 if (is_expiry_label == 1 and has_date_pattern) else 0
 
-# Train Random Forest Model
+                X_train.append(extract_features(text_line))
+                y_train.append(line_label)
+
+# 4. Train and save the Random Forest model
 clf = RandomForestClassifier(n_estimators=100, random_state=42)
 clf.fit(X_train, y_train)
 
 joblib.dump(clf, "model.pkl")
-print("AI Model successfully trained and saved to model.pkl")
+print(f"AI Model successfully trained on {len(X_train)} samples and saved to model.pkl")

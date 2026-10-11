@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Expiry Date Scanner</title>
+    <title>Expiry Date Scanner</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 650px; margin: 40px auto; padding: 20px; background-color: #f4f6f9; }
         .card { background: white; border: 1px solid #e1e4e8; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
@@ -17,6 +17,15 @@
         .badge { background: #28a745; color: white; padding: 3px 8px; border-radius: 4px; font-size: 12px; margin-left: 5px; }
         .wording { color: #1e7e34; font-weight: bold; font-size: 16px; }
         .loading { display: none; text-align: center; margin-top: 15px; font-weight: bold; color: #007bff; }
+        
+        /* Feedback UI Styling */
+        .feedback-box { margin-top: 15px; padding-top: 15px; border-top: 1px solid #d0d7de; }
+        .feedback-buttons { display: flex; gap: 10px; margin-top: 8px; }
+        .btn-yes { background-color: #28a745; flex: 1; }
+        .btn-yes:hover { background-color: #218838; }
+        .btn-no { background-color: #dc3545; flex: 1; }
+        .btn-no:hover { background-color: #c82333; }
+        .feedback-msg { margin-top: 8px; font-size: 14px; font-weight: bold; color: #495057; }
     </style>
 </head>
 <body>
@@ -37,12 +46,23 @@
             <h3>Results:</h3>
             <ul id="datesList"></ul>
             <p><strong>Full OCR Text:</strong> <span id="rawText"></span></p>
+
+            <!-- Active Learning Feedback Section -->
+            <div id="feedbackSection" class="feedback-box">
+                <p style="margin: 0; font-weight: bold;">Does this photo contain a valid expiry date?</p>
+                <div class="feedback-buttons">
+                    <button type="button" id="btnYes" class="btn-yes" onclick="submitFeedback(1)">Yes (1)</button>
+                    <button type="button" id="btnNo" class="btn-no" onclick="submitFeedback(0)">No (0)</button>
+                </div>
+                <div id="feedbackMsg" class="feedback-msg"></div>
+            </div>
         </div>
     </div>
 
     <script>
         const imageInput = document.getElementById('imageInput');
         const preview = document.getElementById('preview');
+        let currentImageId = null;
 
         // Image Preview Handler
         imageInput.addEventListener('change', function() {
@@ -69,10 +89,15 @@
             const resultsDiv = document.getElementById('results');
             const datesList = document.getElementById('datesList');
             const rawText = document.getElementById('rawText');
+            const feedbackSection = document.getElementById('feedbackSection');
+            const feedbackMsg = document.getElementById('feedbackMsg');
 
             submitBtn.disabled = true;
             loading.style.display = 'block';
             resultsDiv.style.display = 'none';
+            feedbackMsg.innerText = '';
+            document.getElementById('btnYes').disabled = false;
+            document.getElementById('btnNo').disabled = false;
 
             const formData = new FormData();
             formData.append('image', fileInput.files[0]);
@@ -81,6 +106,12 @@
                 const response = await fetch('/predict', { method: 'POST', body: formData });
                 const data = await response.json();
 
+                if (data.error) {
+                    alert("Error: " + data.error);
+                    return;
+                }
+
+                currentImageId = data.image_id;
                 datesList.innerHTML = '';
                 rawText.innerText = data.full_text || "None";
 
@@ -89,8 +120,7 @@
                         const li = document.createElement('li');
                         li.style.marginBottom = "10px";
                         li.innerHTML = `Raw Text: <code>${item.raw_text}</code><br>` +
-                                       `Formatted: <span class="wording">${item.wording}</span>` +
-                                       `${item.ai_verified ? '<span class="badge">AI Verified</span>' : ''}`;
+                                       `Formatted: <span class="wording">${item.wording}</span>`;
                         datesList.appendChild(li);
                     });
                 } else {
@@ -98,6 +128,7 @@
                 }
 
                 resultsDiv.style.display = 'block';
+                feedbackSection.style.display = 'block';
             } catch (error) {
                 alert("Error processing image. Make sure server is running.");
             } finally {
@@ -105,6 +136,41 @@
                 loading.style.display = 'none';
             }
         });
+
+        // Feedback Submission Handler
+        async function submitFeedback(isExpiry) {
+            if (!currentImageId) return;
+
+            const btnYes = document.getElementById('btnYes');
+            const btnNo = document.getElementById('btnNo');
+            const feedbackMsg = document.getElementById('feedbackMsg');
+
+            btnYes.disabled = true;
+            btnNo.disabled = true;
+
+            try {
+                const response = await fetch('/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        image_id: currentImageId,
+                        is_expiry: isExpiry
+                    })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    feedbackMsg.innerText = `✓ Thank you! Image recorded to dataset as label ${isExpiry}.`;
+                    feedbackMsg.style.color = "#28a745";
+                } else {
+                    feedbackMsg.innerText = "Failed to record feedback: " + data.error;
+                    feedbackMsg.style.color = "#dc3545";
+                }
+            } catch (err) {
+                feedbackMsg.innerText = "Network error submitting feedback.";
+                feedbackMsg.style.color = "#dc3545";
+            }
+        }
     </script>
 </body>
 </html>
