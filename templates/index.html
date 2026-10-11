@@ -3,37 +3,137 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Prevents automatic favicon requests -->
+    <link rel="icon" href="data:,">
     <title>Expiry Date Scanner</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 650px; margin: 40px auto; padding: 20px; background-color: #f4f6f9; }
-        .card { background: white; border: 1px solid #e1e4e8; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
-        h2 { margin-top: 0; color: #333; }
-        .file-box { border: 2px dashed #007bff; padding: 20px; border-radius: 8px; text-align: center; background: #f8f9fa; cursor: pointer; margin-bottom: 15px; }
-        #preview { max-width: 100%; max-height: 250px; margin-top: 10px; border-radius: 6px; display: none; }
-        button { background-color: #007bff; color: white; border: none; padding: 12px 20px; width: 100%; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-        button:hover { background-color: #0056b3; }
-        button:disabled { background-color: #cccccc; cursor: not-allowed; }
-        .result { margin-top: 20px; padding: 15px; background: #eef2f5; border-radius: 6px; }
-        .badge { background: #28a745; color: white; padding: 3px 8px; border-radius: 4px; font-size: 12px; margin-left: 5px; }
-        .wording { color: #1e7e34; font-weight: bold; font-size: 16px; }
-        .loading { display: none; text-align: center; margin-top: 15px; font-weight: bold; color: #007bff; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            max-width: 650px; 
+            margin: 40px auto; 
+            padding: 20px; 
+            background-color: #f4f6f9; 
+        }
+        .card { 
+            background: white; 
+            border: 1px solid #e1e4e8; 
+            padding: 25px; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08); 
+        }
+        h2 { 
+            margin-top: 0; 
+            color: #333; 
+        }
+        .file-box { 
+            border: 2px dashed #007bff; 
+            padding: 20px; 
+            border-radius: 8px; 
+            text-align: center; 
+            background: #f8f9fa; 
+            cursor: pointer; 
+            margin-bottom: 15px; 
+            transition: background 0.2s, border-color 0.2s; 
+        }
+        .file-box.dragover { 
+            background: #e3f2fd; 
+            border-color: #0056b3; 
+        }
+        #preview { 
+            max-width: 100%; 
+            max-height: 250px; 
+            margin-top: 10px; 
+            border-radius: 6px; 
+            display: none; 
+            margin-left: auto; 
+            margin-right: auto; 
+        }
+        button { 
+            background-color: #007bff; 
+            color: white; 
+            border: none; 
+            padding: 12px 20px; 
+            width: 100%; 
+            border-radius: 6px; 
+            font-size: 16px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            transition: background 0.2s; 
+        }
+        button:hover { 
+            background-color: #0056b3; 
+        }
+        button:disabled { 
+            background-color: #cccccc; 
+            cursor: not-allowed; 
+        }
+        .result { 
+            margin-top: 20px; 
+            padding: 15px; 
+            background: #eef2f5; 
+            border-radius: 6px; 
+        }
+        .wording { 
+            color: #1e7e34; 
+            font-weight: bold; 
+            font-size: 16px; 
+        }
+        .loading { 
+            display: none; 
+            text-align: center; 
+            margin-top: 15px; 
+            font-weight: bold; 
+            color: #007bff; 
+        }
         
-        /* Feedback UI Styling */
-        .feedback-box { margin-top: 15px; padding-top: 15px; border-top: 1px solid #d0d7de; }
-        .feedback-buttons { display: flex; gap: 10px; margin-top: 8px; }
-        .btn-yes { background-color: #28a745; flex: 1; }
-        .btn-yes:hover { background-color: #218838; }
-        .btn-no { background-color: #dc3545; flex: 1; }
-        .btn-no:hover { background-color: #c82333; }
-        .feedback-msg { margin-top: 8px; font-size: 14px; font-weight: bold; color: #495057; }
+        /* Feedback & Admin UI Styling */
+        .feedback-box { 
+            margin-top: 15px; 
+            padding-top: 15px; 
+            border-top: 1px solid #d0d7de; 
+        }
+        .feedback-buttons { 
+            display: flex; 
+            gap: 10px; 
+            margin-top: 8px; 
+        }
+        .btn-yes { 
+            background-color: #28a745; 
+            flex: 1; 
+        }
+        .btn-yes:hover { 
+            background-color: #218838; 
+        }
+        .btn-no { 
+            background-color: #dc3545; 
+            flex: 1; 
+        }
+        .btn-no:hover { 
+            background-color: #c82333; 
+        }
+        .btn-retrain { 
+            background-color: #6c757d; 
+            margin-top: 15px; 
+            font-size: 14px; 
+            padding: 10px; 
+        }
+        .btn-retrain:hover { 
+            background-color: #5a6268; 
+        }
+        .feedback-msg { 
+            margin-top: 8px; 
+            font-size: 14px; 
+            font-weight: bold; 
+            color: #495057; 
+        }
     </style>
 </head>
 <body>
     <div class="card">
         <h2>Product Expiry Date Scanner</h2>
         <form id="uploadForm">
-            <div class="file-box" onclick="document.getElementById('imageInput').click();">
-                <p>Click or drag product image here</p>
+            <div class="file-box" id="dropZone" onclick="document.getElementById('imageInput').click();">
+                <p id="dropText">Click or drag product image here</p>
                 <input type="file" id="imageInput" accept="image/*" style="display:none;" required>
                 <img id="preview" alt="Image Preview">
             </div>
@@ -57,23 +157,56 @@
                 <div id="feedbackMsg" class="feedback-msg"></div>
             </div>
         </div>
+
+        <!-- Admin Retrain Section -->
+        <button type="button" id="btnRetrain" class="btn-retrain" onclick="triggerRetrain()">Trigger AI Retraining (/admin/retrain)</button>
     </div>
 
     <script>
         const imageInput = document.getElementById('imageInput');
         const preview = document.getElementById('preview');
+        const dropZone = document.getElementById('dropZone');
+        const dropText = document.getElementById('dropText');
         let currentImageId = null;
 
-        // Image Preview Handler
-        imageInput.addEventListener('change', function() {
-            const file = this.files[0];
+        // Display Image Preview
+        function handleFile(file) {
             if (file) {
                 const reader = new FileReader();
                 reader.onload = function(e) {
                     preview.src = e.target.result;
                     preview.style.display = 'block';
-                }
+                    dropText.style.display = 'none';
+                };
                 reader.readAsDataURL(file);
+            }
+        }
+
+        imageInput.addEventListener('change', function() {
+            handleFile(this.files[0]);
+        });
+
+        // Drag & Drop Handlers
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                imageInput.files = files;
+                handleFile(files[0]);
             }
         });
 
@@ -89,7 +222,6 @@
             const resultsDiv = document.getElementById('results');
             const datesList = document.getElementById('datesList');
             const rawText = document.getElementById('rawText');
-            const feedbackSection = document.getElementById('feedbackSection');
             const feedbackMsg = document.getElementById('feedbackMsg');
 
             submitBtn.disabled = true;
@@ -113,7 +245,7 @@
 
                 currentImageId = data.image_id;
                 datesList.innerHTML = '';
-                rawText.innerText = data.full_text || "None";
+                rawText.innerText = data.full_text || "No text detected";
 
                 if (data.expiry_dates && data.expiry_dates.length > 0) {
                     data.expiry_dates.forEach(item => {
@@ -128,9 +260,8 @@
                 }
 
                 resultsDiv.style.display = 'block';
-                feedbackSection.style.display = 'block';
             } catch (error) {
-                alert("Error processing image. Make sure server is running.");
+                alert("Error processing image. Make sure the Flask server is running.");
             } finally {
                 submitBtn.disabled = false;
                 loading.style.display = 'none';
@@ -160,15 +291,42 @@
 
                 const data = await response.json();
                 if (response.ok) {
-                    feedbackMsg.innerText = `✓ Thank you! Image recorded to dataset as label ${isExpiry}.`;
+                    feedbackMsg.innerText = `✓ Thank you! Image recorded to annotations.json (label=${isExpiry}).`;
                     feedbackMsg.style.color = "#28a745";
                 } else {
-                    feedbackMsg.innerText = "Failed to record feedback: " + data.error;
+                    feedbackMsg.innerText = "Failed to record feedback: " + (data.error || "Server error");
                     feedbackMsg.style.color = "#dc3545";
+                    btnYes.disabled = false;
+                    btnNo.disabled = false;
                 }
             } catch (err) {
                 feedbackMsg.innerText = "Network error submitting feedback.";
                 feedbackMsg.style.color = "#dc3545";
+                btnYes.disabled = false;
+                btnNo.disabled = false;
+            }
+        }
+
+        // Trigger Model Retraining Handler
+        async function triggerRetrain() {
+            const btnRetrain = document.getElementById('btnRetrain');
+            btnRetrain.disabled = true;
+            btnRetrain.innerText = "Retraining Random Forest model...";
+
+            try {
+                const response = await fetch('/admin/retrain', { method: 'POST' });
+                const data = await response.json();
+
+                if (response.ok) {
+                    alert("Success: " + data.message);
+                } else {
+                    alert("Retraining failed: " + (data.error || "Server error"));
+                }
+            } catch (err) {
+                alert("Network error triggering retraining.");
+            } finally {
+                btnRetrain.disabled = false;
+                btnRetrain.innerText = "Trigger AI Retraining (/admin/retrain)";
             }
         }
     </script>

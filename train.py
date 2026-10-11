@@ -80,88 +80,79 @@ def extract_features(text_string):
     return [length, digit_count, separator_count, has_keywords, digit_ratio]
 
 
-DATASET_DIR = "dataset"
-ANNOTATIONS_FILE = os.path.join(DATASET_DIR, "annotations.json")
-LABELS_FILE = os.path.join(DATASET_DIR, "collected_labels.jsonl")
+def main():
+    DATASET_DIR = "dataset"
+    ANNOTATIONS_FILE = os.path.join(DATASET_DIR, "annotations.json")
 
-X_train = []
-y_train = []
+    X_train = []
+    y_train = []
 
-# 1. Synthetic samples covering baseline packaging formats
-synthetic_samples = [
-    ("EXP 12/08/2027", 1),
-    ("EXP : 10 01 2027", 1),
-    ("PROD : 10 01 2026", 1),
-    ("BEST BEFORE 05-2026", 1),
-    ("BB 10/26", 1),
-    ("EXP 040917", 1),
-    ("10 JAN 2027", 1),
-    ("USE BY 15.08.2027", 1),
-    ("NET WT 500g", 0),
-    ("INGREDIENTS: WATER", 0),
-    ("LOT 88492021", 0),
-    ("NUTRITION FACTS", 0),
-    ("248 kcal", 0)
-]
+    # 1. Synthetic samples covering baseline packaging formats
+    synthetic_samples = [
+        ("EXP 12/08/2027", 1),
+        ("EXP : 10 01 2027", 1),
+        ("PROD : 10 01 2026", 1),
+        ("BEST BEFORE 05-2026", 1),
+        ("BB 10/26", 1),
+        ("EXP 040917", 1),
+        ("10 JAN 2027", 1),
+        ("USE BY 15.08.2027", 1),
+        ("NET WT 500g", 0),
+        ("INGREDIENTS: WATER", 0),
+        ("LOT 88492021", 0),
+        ("NUTRITION FACTS", 0),
+        ("248 kcal", 0)
+    ]
 
-for text, label in synthetic_samples:
-    X_train.append(extract_features(text))
-    y_train.append(label)
+    for text, label in synthetic_samples:
+        X_train.append(extract_features(text))
+        y_train.append(label)
 
-# 2. Consolidate image ground-truth labels from both annotations.json and collected_labels.jsonl
-image_label_map = {}
+    # 2. Load all ground-truth labels directly from dataset/annotations.json
+    image_label_map = {}
+    if os.path.exists(ANNOTATIONS_FILE):
+        try:
+            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+                annotations = json.load(f)
+                for img_name, info in annotations.items():
+                    image_label_map[img_name] = info.get("is_expiry", 0)
+        except json.JSONDecodeError:
+            print(f"Warning: Could not parse '{ANNOTATIONS_FILE}'.")
 
-# Load base labels from annotations.json if present
-if os.path.exists(ANNOTATIONS_FILE):
-    with open(ANNOTATIONS_FILE, 'r') as f:
-        annotations = json.load(f)
-        for img_name, info in annotations.items():
-            image_label_map[img_name] = info.get("is_expiry", 0)
+    # 3. Process all dataset images using consolidated labels
+    if image_label_map:
+        print(f"Processing {len(image_label_map)} tagged images from '{DATASET_DIR}/'...")
 
-# Load user feedback labels appended by app.py
-if os.path.exists(LABELS_FILE):
-    with open(LABELS_FILE, 'r') as f:
-        for line in f:
-            if line.strip():
-                try:
-                    record = json.loads(line)
-                    image_id = record.get("image_id")
-                    is_expiry = record.get("is_expiry")
-                    if image_id and is_expiry in [0, 1]:
-                        image_label_map[image_id] = is_expiry
-                except json.JSONDecodeError:
-                    continue
+        for image_name, is_expiry_label in image_label_map.items():
+            image_path = os.path.join(DATASET_DIR, image_name)
+            if not os.path.exists(image_path):
+                continue
 
-# 3. Process all dataset images using consolidated labels
-if image_label_map:
-    print(f"Processing {len(image_label_map)} tagged images from '{DATASET_DIR}/'...")
+            processed_img = preprocess_image(image_path)
+            if processed_img is None:
+                continue
 
-    for image_name, is_expiry_label in image_label_map.items():
-        image_path = os.path.join(DATASET_DIR, image_name)
-        if not os.path.exists(image_path):
-            continue
+            raw_results = reader.readtext(processed_img) or []
+            grouped_lines = group_ocr_lines(raw_results)
 
-        processed_img = preprocess_image(image_path)
-        if processed_img is None:
-            continue
+            for (text_line, confidence) in grouped_lines:
+                if confidence > 0.3:
+                    has_date_pattern = bool(re.search(
+                        r'(\b\d{1,2}[\s/.-]\d{1,2}[\s/.-]\d{2,4}\b|\b(?:exp|bb|mfg|use|prod)[\s:]*\d+|\b\d{6,8}\b)', 
+                        text_line, re.I
+                    ))
+                    line_label = 1 if (is_expiry_label == 1 and has_date_pattern) else 0
 
-        raw_results = reader.readtext(processed_img)
-        grouped_lines = group_ocr_lines(raw_results)
+                    X_train.append(extract_features(text_line))
+                    y_train.append(line_label)
 
-        for (text_line, confidence) in grouped_lines:
-            if confidence > 0.3:
-                has_date_pattern = bool(re.search(
-                    r'(\b\d{1,2}[\s/.-]\d{1,2}[\s/.-]\d{2,4}\b|\b(?:exp|bb|mfg|use|prod)[\s:]*\d+|\b\d{6,8}\b)', 
-                    text_line, re.I
-                ))
-                line_label = 1 if (is_expiry_label == 1 and has_date_pattern) else 0
+    # 4. Train and save the Random Forest model
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X_train, y_train)
 
-                X_train.append(extract_features(text_line))
-                y_train.append(line_label)
+    joblib.dump(clf, "model.pkl")
+    print(f"AI Model successfully trained on {len(X_train)} total samples and saved to model.pkl")
 
-# 4. Train and save the Random Forest model
-clf = RandomForestClassifier(n_estimators=100, random_state=42)
-clf.fit(X_train, y_train)
 
-joblib.dump(clf, "model.pkl")
-print(f"AI Model successfully trained on {len(X_train)} samples and saved to model.pkl")
+if __name__ == '__main__':
+    main()

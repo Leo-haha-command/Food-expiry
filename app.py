@@ -20,6 +20,7 @@ DATASET_FOLDER = 'dataset'
 REVIEW_FOLDER = os.path.join(DATASET_FOLDER, 'review_queue')
 ANNOTATIONS_FILE = os.path.join(DATASET_FOLDER, 'annotations.json')
 os.makedirs(REVIEW_FOLDER, exist_ok=True)
+os.makedirs(DATASET_FOLDER, exist_ok=True)
 
 # Initialize EasyOCR Reader
 reader = easyocr.Reader(['en'], gpu=False)
@@ -31,6 +32,14 @@ try:
 except FileNotFoundError:
     classifier = None
     print("Warning: model.pkl not found! Run train.py first.")
+
+
+@app.route('/favicon.ico')
+@app.route('/apple-touch-icon.png')
+@app.route('/apple-touch-icon-precomposed.png')
+def ignore_icon_requests():
+    """Suppresses browser 404 icon requests in terminal logs."""
+    return '', 204
 
 
 def preprocess_for_ocr(image_path, target_max_dim=1600):
@@ -167,9 +176,11 @@ def extract_and_format_date(text_line):
 
 def process_image_expiry(grouped_ocr_results):
     date_candidates = []
+    if not grouped_ocr_results:
+        return date_candidates
 
     for (text, confidence) in grouped_ocr_results:
-        if confidence < 0.20:
+        if not text or confidence < 0.20:
             continue
 
         formatted_wording = extract_and_format_date(text)
@@ -206,23 +217,27 @@ def predict():
         enhanced_gray, binary_img = preprocess_for_ocr(filepath)
 
         if enhanced_gray is None:
-            return jsonify({"error": "Failed to read image"}), 400
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            return jsonify({"error": "Failed to read or decode image"}), 400
 
         # Pass 1: High-accuracy grayscale OCR
-        raw_results = reader.readtext(enhanced_gray)
+        raw_results = reader.readtext(enhanced_gray) or []
         grouped_lines = group_ocr_lines(raw_results)
         detected_dates = process_image_expiry(grouped_lines)
 
         # Pass 2: Fall back to dot-matrix binary OCR if Pass 1 yields no dates
         if not detected_dates:
-            raw_results_fallback = reader.readtext(binary_img)
+            raw_results_fallback = reader.readtext(binary_img) or []
             grouped_lines_fallback = group_ocr_lines(raw_results_fallback)
             detected_dates_fallback = process_image_expiry(grouped_lines_fallback)
             if detected_dates_fallback:
                 grouped_lines = grouped_lines_fallback
                 detected_dates = detected_dates_fallback
+            elif not grouped_lines and grouped_lines_fallback:
+                grouped_lines = grouped_lines_fallback
 
-        full_text = " | ".join([text for (text, _) in grouped_lines])
+        full_text = " | ".join([text for (text, _) in grouped_lines if text]) if grouped_lines else "No text detected on image"
 
         # Save preprocessed image temporarily in review queue
         image_id = f"{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:6]}.jpg"
@@ -235,11 +250,11 @@ def predict():
         return jsonify({
             "image_id": image_id,
             "full_text": full_text,
-            "expiry_dates": detected_dates
+            "expiry_dates": detected_dates or []
         })
 
     except Exception as e:
-        print("Server Error:", str(e))
+        print("Server Error during prediction:", str(e))
         return jsonify({"error": f"Internal processing error: {str(e)}"}), 500
 
 
