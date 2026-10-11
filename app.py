@@ -22,34 +22,71 @@ except FileNotFoundError:
     print("Warning: model.pkl not found! Run train.py first.")
 
 def preprocess_image(image_path):
-    """Applies glare correction, dot-matrix joining, and thresholding."""
+    """Enhanced OpenCV preprocessing for dot-matrix text on crinkled plastic."""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return None
 
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # 1. Equalize contrast across shadows/wrinkles
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(img)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    # 2. Horizontal Morphological Kernel to bridge dot-matrix digit gaps
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (4, 2))
     connected_dots = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
 
+    # 3. Adaptive binarization to clean up plastic film reflection
     binary = cv2.adaptiveThreshold(
         connected_dots, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
         cv2.THRESH_BINARY, 11, 2
     )
     return binary
 
+def group_ocr_lines(ocr_results, y_tolerance=18):
+    """
+    Groups OCR bounding boxes on the same horizontal line into single sentences.
+    Prevents 'EXP' and '10 01 2027' from being split into separate tokens.
+    """
+    if not ocr_results:
+        return []
+
+    # Sort bounding boxes top-to-bottom by Y center
+    sorted_results = sorted(ocr_results, key=lambda res: (res[0][0][1] + res[0][2][1]) / 2.0)
+    lines = []
+
+    for box, text, conf in sorted_results:
+        y_center = (box[0][1] + box[2][1]) / 2.0
+        placed = False
+
+        for line in lines:
+            if abs(line['y_center'] - y_center) < y_tolerance:
+                line['text'] += " " + text
+                line['confs'].append(conf)
+                line['y_center'] = (line['y_center'] + y_center) / 2.0
+                placed = True
+                break
+
+        if not placed:
+            lines.append({'text': text, 'confs': [conf], 'y_center': y_center})
+
+    return [(l['text'], sum(l['confs']) / len(l['confs'])) for l in lines]
+
 def extract_features(text_string):
     length = len(text_string)
     digit_count = sum(c.isdigit() for c in text_string)
-    slash_dash_count = text_string.count('/') + text_string.count('-') + text_string.count('.')
-    has_keywords = 1 if re.search(r'(exp|bb|best|use)', text_string, re.I) else 0
+    separator_count = (text_string.count('/') + text_string.count('-') + 
+                       text_string.count('.') + text_string.count(' '))
+    has_keywords = 1 if re.search(r'(exp|bb|best|use|prod)', text_string, re.I) else 0
     digit_ratio = digit_count / max(length, 1)
-    return np.array([[length, digit_count, slash_dash_count, has_keywords, digit_ratio]])
+    return np.array([[length, digit_count, separator_count, has_keywords, digit_ratio]])
 
 def format_date_to_wording(date_string):
     try:
-        dt = parse(date_string, fuzzy=True)
+        # Extract purely the date component from full text line (e.g. "10 01 2027")
+        match = re.search(r'(\b\d{2}[\s/.-]\d{2}[\s/.-]\d{2,4}\b|\b\d{4}[\s/.-]\d{2}[\s/.-]\d{2}\b)', date_string)
+        target_str = match.group(0) if match else date_string
+
+        dt = parse(target_str, fuzzy=True)
         wording = dt.strftime("%B %d, %Y")
         
         today = datetime.now()
@@ -66,16 +103,19 @@ def format_date_to_wording(date_string):
     except Exception:
         return date_string
 
-def process_image_expiry(ocr_results):
+def process_image_expiry(grouped_ocr_results):
     date_candidates = []
 
-    for (_, text, confidence) in ocr_results:
-        if confidence < 0.25:
+    # Regex matches: 10 01 2027, 10/01/2027, 10-01-2027, 10.01.2027, 2027-01-10
+    date_regex = re.compile(r'(\b\d{2}[\s/.-]\d{2}[\s/.-]\d{2,4}\b|\b\d{4}[\s/.-]\d{2}[\s/.-]\d{2}\b)')
+
+    for (text, confidence) in grouped_ocr_results:
+        if confidence < 0.20:
             continue
 
         features = extract_features(text)
         is_expiry = classifier.predict(features)[0] if classifier else 0
-        regex_match = re.search(r'(\b\d{2}[/.-]\d{2}[/.-]\d{2,4}\b|\b\d{4}[/.-]\d{2}[/.-]\d{2}\b)', text)
+        regex_match = date_regex.search(text)
 
         if is_expiry or regex_match:
             formatted_wording = format_date_to_wording(text)
@@ -104,17 +144,15 @@ def predict():
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
     file.save(filepath)
 
-    # 1. Preprocess 3D/Curved surface image
     processed_img = preprocess_image(filepath)
-    
-    # 2. Run OCR on processed array (or fallback to original path if preprocessing fails)
-    if processed_img is not None:
-        results = reader.readtext(processed_img)
-    else:
-        results = reader.readtext(filepath)
+    raw_results = reader.readtext(processed_img if processed_img is not None else filepath)
 
-    full_text = " ".join([text for (_, text, _) in results])
-    detected_dates = process_image_expiry(results)
+    # 1. Group fragments on the same horizontal line together
+    grouped_lines = group_ocr_lines(raw_results)
+
+    # 2. Extract full text and detect dates
+    full_text = " | ".join([text for (text, _) in grouped_lines])
+    detected_dates = process_image_expiry(grouped_lines)
 
     if os.path.exists(filepath):
         os.remove(filepath)
