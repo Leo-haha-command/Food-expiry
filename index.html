@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Expiry Date Scanner</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 650px; margin: 40px auto; padding: 20px; background-color: #f4f6f9; }
+        .card { background: white; border: 1px solid #e1e4e8; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        h2 { margin-top: 0; color: #333; }
+        .file-box { border: 2px dashed #007bff; padding: 20px; border-radius: 8px; text-align: center; background: #f8f9fa; cursor: pointer; margin-bottom: 15px; }
+        #preview { max-width: 100%; max-height: 250px; margin-top: 10px; border-radius: 6px; display: none; }
+        button { background-color: #007bff; color: white; border: none; padding: 12px 20px; width: 100%; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        .result { margin-top: 20px; padding: 15px; background: #eef2f5; border-radius: 6px; }
+        .badge { background: #28a745; color: white; padding: 3px 8px; border-radius: 4px; font-size: 12px; margin-left: 5px; }
+        .wording { color: #1e7e34; font-weight: bold; font-size: 16px; }
+        .loading { display: none; text-align: center; margin-top: 15px; font-weight: bold; color: #007bff; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Product Expiry Date Scanner</h2>
+        <form id="uploadForm">
+            <div class="file-box" onclick="document.getElementById('imageInput').click();">
+                <p>Click or drag product image here</p>
+                <input type="file" id="imageInput" accept="image/*" style="display:none;" required>
+                <img id="preview" alt="Image Preview">
+            </div>
+            <button type="submit" id="submitBtn">Scan & Process Expiry Date</button>
+        </form>
+
+        <div id="loading" class="loading">Processing image with OpenCV & AI...</div>
+
+        <div id="results" class="result" style="display: none;">
+            <h3>Results:</h3>
+            <ul id="datesList"></ul>
+            <p><strong>Full OCR Text:</strong> <span id="rawText"></span></p>
+        </div>
+    </div>
+
+    <script>
+        const imageInput = document.getElementById('imageInput');
+        const preview = document.getElementById('preview');
+
+        // Image Preview Handler
+        imageInput.addEventListener('change', function() {
+            const file = this.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                }
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // Upload Form Handler
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('imageInput');
+            if (!fileInput.files[0]) return;
+
+            const submitBtn = document.getElementById('submitBtn');
+            const loading = document.getElementById('loading');
+            const resultsDiv = document.getElementById('results');
+            const datesList = document.getElementById('datesList');
+            const rawText = document.getElementById('rawText');
+
+            submitBtn.disabled = true;
+            loading.style.display = 'block';
+            resultsDiv.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('image', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/predict', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                datesList.innerHTML = '';
+                rawText.innerText = data.full_text || "None";
+
+                if (data.expiry_dates && data.expiry_dates.length > 0) {
+                    data.expiry_dates.forEach(item => {
+                        const li = document.createElement('li');
+                        li.style.marginBottom = "10px";
+                        li.innerHTML = `Raw Text: <code>${item.raw_text}</code><br>` +
+                                       `Formatted: <span class="wording">${item.wording}</span>` +
+                                       `${item.ai_verified ? '<span class="badge">AI Verified</span>' : ''}`;
+                        datesList.appendChild(li);
+                    });
+                } else {
+                    datesList.innerHTML = '<li>No valid expiry date detected on product.</li>';
+                }
+
+                resultsDiv.style.display = 'block';
+            } catch (error) {
+                alert("Error processing image. Make sure server is running.");
+            } finally {
+                submitBtn.disabled = false;
+                loading.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
