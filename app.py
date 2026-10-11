@@ -21,26 +21,25 @@ except FileNotFoundError:
     classifier = None
     print("Warning: model.pkl not found! Run train.py first.")
 
-def preprocess_image(image_path):
-    """Enhanced OpenCV preprocessing for dot-matrix text on crinkled plastic."""
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+def convert_to_scanned_doc(image_path):
+    """
+    Converts a photo with uneven lighting/reflections into a clean 
+    'scanned document' style binary image before OCR processing.
+    """
+    img = cv2.imread(image_path)
     if img is None:
         return None
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(gray, h=10)
 
-    # 1. Equalize contrast across shadows/wrinkles
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(img)
+    # Shadow division trick to cancel lighting variations on curved plastic
+    blur = cv2.GaussianBlur(denoised, (35, 35), 0)
+    divided = cv2.divide(denoised, blur, scale=255)
 
-    # 2. Horizontal Morphological Kernel to bridge dot-matrix digit gaps
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (4, 2))
-    connected_dots = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
-
-    # 3. Adaptive binarization to clean up plastic film reflection
-    binary = cv2.adaptiveThreshold(
-        connected_dots, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 11, 2
-    )
-    return binary
+    # Otsu thresholding for sharp black-and-white contrast
+    _, scanned_doc = cv2.threshold(divided, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return scanned_doc
 
 def group_ocr_lines(ocr_results, y_tolerance=18):
     """
@@ -106,7 +105,7 @@ def format_date_to_wording(date_string):
 def process_image_expiry(grouped_ocr_results):
     date_candidates = []
 
-    # Regex matches: 10 01 2027, 10/01/2027, 10-01-2027, 10.01.2027, 2027-01-10
+    # Matches dates formatted with spaces, slashes, dashes, or dots
     date_regex = re.compile(r'(\b\d{2}[\s/.-]\d{2}[\s/.-]\d{2,4}\b|\b\d{4}[\s/.-]\d{2}[\s/.-]\d{2}\b)')
 
     for (text, confidence) in grouped_ocr_results:
@@ -144,13 +143,15 @@ def predict():
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
     file.save(filepath)
 
-    processed_img = preprocess_image(filepath)
-    raw_results = reader.readtext(processed_img if processed_img is not None else filepath)
+    # 1. Convert photo into a clean scanned document format
+    scanned_image = convert_to_scanned_doc(filepath)
 
-    # 1. Group fragments on the same horizontal line together
+    # 2. Extract OCR lines from scanned image (or original fallback)
+    raw_results = reader.readtext(scanned_image if scanned_image is not None else filepath)
+
+    # 3. Group OCR fragments into horizontal lines
     grouped_lines = group_ocr_lines(raw_results)
 
-    # 2. Extract full text and detect dates
     full_text = " | ".join([text for (text, _) in grouped_lines])
     detected_dates = process_image_expiry(grouped_lines)
 
